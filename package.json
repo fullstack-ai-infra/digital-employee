@@ -82,7 +82,7 @@
   },
   "devDependencies": {
     "@types/node": "26.1.2",
-    "tsx": "4.20.6",
+    "tsx": "4.23.7",
     "typescript": "7.0.2"
   }
 }
