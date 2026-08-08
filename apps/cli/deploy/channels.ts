@@ -1,275 +1,272 @@
-/**
- * Channel deployment logic.
- * Each channel has its own setup/teardown logic.
- */
+/** Channel-specific deploy orchestration with observable outcome evidence. */
 
-import { execFile } from "node:child_process"
+import { spawn } from "node:child_process"
+import type { ChildProcess } from "node:child_process"
+import { get as httpGet } from "node:http"
+import { fileURLToPath } from "node:url"
+import { setTimeout as delay } from "node:timers/promises"
+
 import { t } from "./i18n.js"
-import type { DeployConfig } from "./config.js"
+import { getConfigPath } from "./config.js"
+import type {
+  DeployConfig,
+  DeployEndpoint,
+  DeployOutcome,
+  DeployProcessState,
+} from "./config.js"
 
 export type ChannelId = "dingtalk" | "lark" | "wecom" | "console" | "http"
 
 export interface ChannelDeployResult {
-  success: boolean
+  outcome: DeployOutcome
   steps: string[]
-  error?: string
+  code?: string
+  guidance?: string
+  endpoint?: DeployEndpoint
+  process?: DeployProcessState
+}
+
+export interface ChannelDeployContext {
+  signal?: AbortSignal
+  readinessTimeoutMs?: number
+}
+
+function outcome(
+  value: DeployOutcome,
+  code: string,
+  guidance: string,
+): ChannelDeployResult {
+  return { outcome: value, steps: [], code, guidance }
 }
 
 /**
- * Deploy to DingTalk channel via dws CLI.
+ * DingTalk remote creation remains pending until provider output/readback is
+ * implemented. It must never be represented as completed local readiness.
  */
 export async function deployDingTalk(
-  config: DeployConfig,
+  _config: DeployConfig,
 ): Promise<ChannelDeployResult> {
-  const steps: string[] = []
-
-  // Check dws CLI availability
-  const dwsAvailable = await checkCommand("dws")
-  if (!dwsAvailable) {
-    return { success: false, steps, error: t("deploy.error_dws_not_found") }
-  }
-
-  // Step 1: Auth via device flow
-  process.stdout.write(`\n${t("deploy.auth_scan_prompt")}\n`)
-  try {
-    await runDwsAuth()
-    process.stdout.write(`  ${t("deploy.auth_done")}\n`)
-  } catch {
-    return { success: false, steps, error: t("deploy.error_auth_failed") }
-  }
-
-  // Step 2: Create app
-  try {
-    await runDwsCommand([
-      "app", "create",
-      "--name", config.botName || "Digital Employee",
-      "--type", "bot",
-    ])
-    steps.push(t("deploy.step_app_created"))
-    process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-  } catch (err) {
-    // App may already exist — continue
-    steps.push(t("deploy.step_app_created"))
-    process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-  }
-
-  // Step 3: Configure bot (stream mode)
-  steps.push(t("deploy.step_bot_configured"))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-
-  // Step 4: Submit version for approval
-  steps.push(t("deploy.step_version_submitted"))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-
-  // Step 5: Start service
-  steps.push(t("deploy.step_service_started"))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-
-  return { success: true, steps }
+  return outcome(
+    "pending_external_action",
+    "dingtalk_provider_action_required",
+    t("deploy.guidance_dingtalk_pending"),
+  )
 }
 
-/**
- * Deploy to console channel (no-op, just config generation).
- */
+export async function deployLark(
+  _config: DeployConfig,
+): Promise<ChannelDeployResult> {
+  return outcome(
+    "unsupported",
+    "lark_live_deploy_unsupported",
+    t("deploy.guidance_lark_unsupported"),
+  )
+}
+
+export async function deployWeCom(
+  _config: DeployConfig,
+): Promise<ChannelDeployResult> {
+  return outcome(
+    "unsupported",
+    "wecom_live_deploy_unsupported",
+    t("deploy.guidance_wecom_unsupported"),
+  )
+}
+
+/** Console requires an attached foreground terminal; no detached no-op exists. */
 export async function deployConsole(
   _config: DeployConfig,
 ): Promise<ChannelDeployResult> {
-  const steps: string[] = []
-  steps.push(t("deploy.step_config_written"))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-  steps.push(t("deploy.step_console_ready"))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-  return { success: true, steps }
+  return outcome(
+    "pending_external_action",
+    "console_foreground_start_required",
+    t("deploy.guidance_console_pending"),
+  )
 }
 
-/**
- * Deploy to HTTP channel (config generation + service info).
- */
+interface HttpReadiness {
+  schemaVersion?: unknown
+  status?: unknown
+  pid?: unknown
+  endpoint?: { askPath?: unknown; healthPath?: unknown }
+  package?: {
+    name?: unknown
+    version?: unknown
+    digest?: unknown
+    runtime?: unknown
+    engine?: unknown
+  }
+}
+
+async function readHttpReadiness(
+  endpoint: DeployEndpoint,
+  timeoutMs: number,
+): Promise<HttpReadiness | undefined> {
+  return new Promise((resolve) => {
+    const request = httpGet(
+      {
+        host: endpoint.host,
+        port: endpoint.port,
+        path: endpoint.healthPath,
+        timeout: timeoutMs,
+        headers: { accept: "application/json" },
+      },
+      (response) => {
+        const chunks: Buffer[] = []
+        let bytes = 0
+        response.on("data", (chunk: Buffer | string) => {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+          bytes += buffer.length
+          if (bytes <= 64 * 1024) chunks.push(buffer)
+          else request.destroy()
+        })
+        response.on("end", () => {
+          if (response.statusCode !== 200 || bytes > 64 * 1024) {
+            resolve(undefined)
+            return
+          }
+          try {
+            resolve(
+              JSON.parse(Buffer.concat(chunks).toString("utf8")) as HttpReadiness,
+            )
+          } catch {
+            resolve(undefined)
+          }
+        })
+      },
+    )
+    request.once("timeout", () => request.destroy())
+    request.once("error", () => resolve(undefined))
+  })
+}
+
+function readinessMatches(
+  readiness: HttpReadiness | undefined,
+  config: DeployConfig,
+  pid: number,
+): boolean {
+  return Boolean(
+    readiness?.schemaVersion === "deploy-readiness.v1" &&
+      readiness.status === "ok" &&
+      readiness.pid === pid &&
+      readiness.endpoint?.askPath === "/v1/ask" &&
+      readiness.endpoint?.healthPath === "/health" &&
+      readiness.package?.name === config.package?.name &&
+      readiness.package?.version === config.package?.version &&
+      readiness.package?.digest === config.package?.digest &&
+      readiness.package?.runtime === config.runtime &&
+      readiness.package?.engine === config.engine,
+  )
+}
+
+function httpRuntimeInvocation(): { command: string; args: string[] } {
+  const sourceMode = import.meta.url.endsWith(".ts")
+  const entry = fileURLToPath(
+    new URL(sourceMode ? "./http-runtime.ts" : "./http-runtime.js", import.meta.url),
+  )
+  return {
+    command: process.execPath,
+    args: [
+      ...(sourceMode ? ["--import", "tsx"] : []),
+      entry,
+      "--state",
+      getConfigPath(),
+    ],
+  }
+}
+
+function terminateOwnedProcess(child: ChildProcess): void {
+  const pid = child.pid
+  if (!pid || pid === process.pid) return
+  try {
+    process.kill(process.platform === "win32" ? pid : -pid, "SIGTERM")
+  } catch {
+    try {
+      child.kill("SIGTERM")
+    } catch {
+      // The process already exited.
+    }
+  }
+}
+
+export async function readbackHttpDeployment(
+  config: DeployConfig,
+): Promise<boolean> {
+  if (!config.endpoint || !config.process) return false
+  const readiness = await readHttpReadiness(config.endpoint, 500)
+  return readinessMatches(readiness, config, config.process.pid)
+}
+
 export async function deployHttp(
   config: DeployConfig,
+  {
+    signal,
+    readinessTimeoutMs = 8_000,
+  }: ChannelDeployContext = {},
 ): Promise<ChannelDeployResult> {
-  const port = String(config.port || 3000)
-  const steps: string[] = []
-  steps.push(t("deploy.step_config_written"))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-  steps.push(t("deploy.step_http_ready", { port }))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-  return { success: true, steps }
-}
-
-/**
- * Deploy to Lark (Feishu) channel via OAuth + Open Platform API.
- */
-export async function deployLark(
-  config: DeployConfig,
-): Promise<ChannelDeployResult> {
-  const steps: string[] = []
-
-  // Step 1: OAuth login via device flow (QR code)
-  process.stdout.write(`\n${t("deploy.lark_auth_scan_prompt")}\n`)
-  try {
-    await runLarkAuth()
-    process.stdout.write(`  ${t("deploy.auth_done")}\n`)
-  } catch {
-    return { success: false, steps, error: t("deploy.error_lark_auth_failed") }
+  if (!config.endpoint || !config.package || !config.engine || !config.runtime) {
+    return outcome("failed", "http_deploy_state_invalid", t("deploy.error_state_invalid"))
   }
-
-  // Step 2: Create Lark app
-  try {
-    await runLarkCommand([
-      "app", "create",
-      "--name", config.botName || "Digital Employee",
-      "--type", "bot",
-    ])
-    steps.push(t("deploy.step_lark_app_created"))
-    process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-  } catch {
-    // App may already exist — continue
-    steps.push(t("deploy.step_lark_app_created"))
-    process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-  }
-
-  // Step 3: Configure event subscription
-  steps.push(t("deploy.step_lark_events_configured"))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-
-  // Step 4: Publish version
-  steps.push(t("deploy.step_lark_version_published"))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-
-  // Step 5: Start service
-  steps.push(t("deploy.step_service_started"))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-
-  return { success: true, steps }
-}
-
-/**
- * Deploy to WeCom (企业微信) channel via OAuth + Open API.
- */
-export async function deployWeCom(
-  config: DeployConfig,
-): Promise<ChannelDeployResult> {
-  const steps: string[] = []
-
-  // Step 1: OAuth login via browser-based device flow
-  process.stdout.write(`\n${t("deploy.wecom_auth_prompt")}\n`)
-  try {
-    await runWeComAuth()
-    process.stdout.write(`  ${t("deploy.auth_done")}\n`)
-  } catch {
-    return { success: false, steps, error: t("deploy.error_wecom_auth_failed") }
-  }
-
-  // Step 2: Create WeCom app (agent)
-  try {
-    await runWeComCommand([
-      "app", "create",
-      "--name", config.botName || "Digital Employee",
-      "--type", "bot",
-    ])
-    steps.push(t("deploy.step_wecom_app_created"))
-    process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-  } catch {
-    // App may already exist — continue
-    steps.push(t("deploy.step_wecom_app_created"))
-    process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-  }
-
-  // Step 3: Configure message callback
-  steps.push(t("deploy.step_wecom_callback_configured"))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-
-  // Step 4: Start service
-  steps.push(t("deploy.step_service_started"))
-  process.stdout.write(`  ${steps[steps.length - 1]}\n`)
-
-  return { success: true, steps }
-}
-
-// --- Helpers ---
-
-function checkCommand(cmd: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    execFile("which", [cmd], (error) => {
-      resolve(!error)
-    })
-  })
-}
-
-function runDwsAuth(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = execFile(
-      "dws",
-      ["auth", "login", "--device"],
-      { timeout: 120_000 },
-      (error) => {
-        if (error) reject(error)
-        else resolve()
-      },
+  if (config.runtime !== "agent-native") {
+    return outcome(
+      "unsupported",
+      "http_standalone_runtime_not_available",
+      t("deploy.guidance_standalone_unsupported"),
     )
-    // Pipe stdout so user can see QR code
-    proc.stdout?.pipe(process.stdout)
-    proc.stderr?.pipe(process.stderr)
-  })
-}
+  }
 
-function runDwsCommand(args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile("dws", args, { timeout: 30_000 }, (error, stdout) => {
-      if (error) reject(error)
-      else resolve(stdout)
+  const invocation = httpRuntimeInvocation()
+  let child: ChildProcess
+  try {
+    child = spawn(invocation.command, invocation.args, {
+      detached: true,
+      env: process.env,
+      stdio: "ignore",
+      windowsHide: true,
     })
+  } catch {
+    return outcome("failed", "http_process_start_failed", t("deploy.error_process_start"))
+  }
+  if (!child.pid) {
+    terminateOwnedProcess(child)
+    return outcome("failed", "http_process_start_failed", t("deploy.error_process_start"))
+  }
+
+  const startedAt = new Date().toISOString()
+  let exited = false
+  child.once("exit", () => {
+    exited = true
   })
+  const abort = () => terminateOwnedProcess(child)
+  signal?.addEventListener("abort", abort, { once: true })
+  try {
+    const deadline = Date.now() + readinessTimeoutMs
+    while (!exited && !signal?.aborted && Date.now() < deadline) {
+      const readiness = await readHttpReadiness(config.endpoint, 400)
+      if (readinessMatches(readiness, config, child.pid)) {
+        child.unref()
+        return {
+          outcome: "ready",
+          steps: [t("deploy.step_http_ready", { port: String(config.endpoint.port) })],
+          endpoint: config.endpoint,
+          process: { pid: child.pid, startedAt },
+        }
+      }
+      await delay(100, undefined, { signal }).catch(() => undefined)
+    }
+  } finally {
+    signal?.removeEventListener("abort", abort)
+  }
+  terminateOwnedProcess(child)
+  return outcome(
+    "failed",
+    signal?.aborted ? "deploy_interrupted" : "http_readiness_failed",
+    signal?.aborted
+      ? t("deploy.error_interrupted")
+      : t("deploy.error_http_readiness"),
+  )
 }
 
-function runLarkAuth(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = execFile(
-      "lark-cli",
-      ["auth", "login", "--device"],
-      { timeout: 120_000 },
-      (error) => {
-        if (error) reject(error)
-        else resolve()
-      },
-    )
-    // Pipe stdout so user can see QR code
-    proc.stdout?.pipe(process.stdout)
-    proc.stderr?.pipe(process.stderr)
-  })
-}
-
-function runLarkCommand(args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile("lark-cli", args, { timeout: 30_000 }, (error, stdout) => {
-      if (error) reject(error)
-      else resolve(stdout)
-    })
-  })
-}
-
-function runWeComAuth(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = execFile(
-      "wecom-cli",
-      ["auth", "login", "--device"],
-      { timeout: 120_000 },
-      (error) => {
-        if (error) reject(error)
-        else resolve()
-      },
-    )
-    proc.stdout?.pipe(process.stdout)
-    proc.stderr?.pipe(process.stderr)
-  })
-}
-
-function runWeComCommand(args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile("wecom-cli", args, { timeout: 30_000 }, (error, stdout) => {
-      if (error) reject(error)
-      else resolve(stdout)
-    })
-  })
+export function endpointUrl(endpoint: DeployEndpoint): string {
+  return `http://${endpoint.host}:${endpoint.port}${endpoint.askPath}`
 }
