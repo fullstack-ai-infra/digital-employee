@@ -1,11 +1,5 @@
-.git
-.github
-.cache
-node_modules
-coverage
-data
-docs/assets
-*.log
-.env
-.env.*
-!.env.example
+**
+!Dockerfile
+!.cache/
+!.cache/distribution/
+!.cache/distribution/digital-employee-package.tgz

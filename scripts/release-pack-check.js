@@ -63,7 +63,7 @@ function expectedFilename(manifest) {
   return `${packageSlug}-${manifest.version}.tgz`;
 }
 
-function manifestViolations(manifest, packageManifest) {
+export function validateDistributionManifest(manifest, packageManifest) {
   const violations = [];
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
     return [{ code: "DISTRIBUTION_MANIFEST_INVALID" }];
@@ -146,10 +146,12 @@ async function validateRootArchive({ archivePath, pack, packageManifest }) {
   try {
     artifactManifest = await archiveManifest(archivePath);
   } catch {
-    return [{ code: "DISTRIBUTION_MANIFEST_MISSING", path: DISTRIBUTION_MANIFEST_PATH }];
+    return {
+      violations: [{ code: "DISTRIBUTION_MANIFEST_MISSING", path: DISTRIBUTION_MANIFEST_PATH }]
+    };
   }
-  const violations = manifestViolations(artifactManifest, packageManifest);
-  if (violations.length) return violations;
+  const violations = validateDistributionManifest(artifactManifest, packageManifest);
+  if (violations.length) return { violations };
 
   const expectedFiles = [
     ...artifactManifest.files.map((file) => file.path),
@@ -159,7 +161,7 @@ async function validateRootArchive({ archivePath, pack, packageManifest }) {
     expectedFiles,
     pack.files.map((file) => file.path)
   ));
-  if (violations.length) return violations;
+  if (violations.length) return { violations };
 
   const temporary = await mkdtemp(path.join(os.tmpdir(), "digital-employee-pack-"));
   try {
@@ -178,7 +180,15 @@ async function validateRootArchive({ archivePath, pack, packageManifest }) {
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
-  return violations;
+  return {
+    violations,
+    summary: {
+      sourceSha: artifactManifest.source.gitCommit,
+      fileCount: artifactManifest.files.length,
+      fileSetDigest: artifactManifest.fileSetDigest,
+      toolchain: artifactManifest.toolchain
+    }
+  };
 }
 
 export function validatePackOutput({
@@ -286,7 +296,7 @@ async function main() {
       });
     }
   }
-  if (rootVerification) errors.push(...rootVerification);
+  if (rootVerification) errors.push(...rootVerification.violations);
 
   if (errors.length) {
     process.stderr.write(`${JSON.stringify({
@@ -302,7 +312,8 @@ async function main() {
   process.stdout.write(`${JSON.stringify({
     schemaVersion: "distribution-verification-result.v1",
     status: "passed",
-    packages: ["root", "core"]
+    packages: ["root", "core"],
+    artifact: rootVerification?.summary
   })}\n`);
 }
 

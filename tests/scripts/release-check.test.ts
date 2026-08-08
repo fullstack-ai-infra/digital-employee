@@ -6,9 +6,13 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import {
   compiledDistributionFiles,
+  computeDistributionFileSetDigest,
   validateCandidateFileSet
 } from "../../scripts/distribution-policy.js";
-import { validatePackOutput } from "../../scripts/release-pack-check.js";
+import {
+  validateDistributionManifest,
+  validatePackOutput
+} from "../../scripts/release-pack-check.js";
 import { validateRelease } from "../../scripts/release-check.js";
 
 const repositoryRoot = path.resolve(
@@ -265,8 +269,15 @@ test("distribution policy maps only tracked runtime TypeScript outputs", () => {
 });
 
 test("distribution policy rejects missing, undeclared and credential-shaped files", () => {
-  const expected = ["dist/apps/cli/bin.js", "dist/locales/en.json"];
+  const expected = [
+    "dist/apps/cli/bin.js",
+    "dist/examples/recipes/minimal-answer.v1/minimal-answer/employee.json",
+    "dist/locales/en.json"
+  ];
   assert.deepEqual(validateCandidateFileSet(expected, ["dist/apps/cli/bin.js"]), [{
+    code: "DISTRIBUTION_REQUIRED_FILE_MISSING",
+    path: "dist/examples/recipes/minimal-answer.v1/minimal-answer/employee.json"
+  }, {
     code: "DISTRIBUTION_REQUIRED_FILE_MISSING",
     path: "dist/locales/en.json"
   }]);
@@ -284,6 +295,50 @@ test("distribution policy rejects missing, undeclared and credential-shaped file
     code: "DISTRIBUTION_CREDENTIAL_PATH_FORBIDDEN",
     path: "dist/config/credentials.json"
   }]);
+});
+
+test("distribution manifest binds source, toolchain and per-file digests", () => {
+  const files = [{
+    path: "dist/apps/cli/bin.js",
+    size: 3,
+    sha256: "a".repeat(64)
+  }];
+  const artifactManifest = {
+    schemaVersion: "digital-employee-distribution.v1",
+    package: { name: manifest.name, version: manifest.version },
+    source: { gitCommit: "b".repeat(40), dirty: false },
+    toolchain: { node: "v24.13.0", npm: "11.6.2", typescript: "7.0.2" },
+    digestAlgorithm: "sha256",
+    manifestPath: "dist/distribution-manifest.json",
+    manifestDigestExcluded: true,
+    fileSetDigest: computeDistributionFileSetDigest(files),
+    files
+  };
+  assert.deepEqual(validateDistributionManifest(artifactManifest, manifest), []);
+  assert.deepEqual(validateDistributionManifest({
+    ...artifactManifest,
+    fileSetDigest: `sha256:${"0".repeat(64)}`
+  }, manifest), [{ code: "DISTRIBUTION_MANIFEST_DIGEST_INVALID" }]);
+});
+
+test("container and CI consume the generated tarball without source fallback", async () => {
+  const [dockerfile, dockerignore, workflowText] = await Promise.all([
+    readFile(path.join(repositoryRoot, "Dockerfile"), "utf8"),
+    readFile(path.join(repositoryRoot, ".dockerignore"), "utf8"),
+    readFile(path.join(repositoryRoot, ".github/workflows/ci.yml"), "utf8")
+  ]);
+  assert.match(dockerfile, /COPY --chown=node:node \.cache\/distribution\/digital-employee-package\.tgz/);
+  assert.doesNotMatch(dockerfile, /COPY --chown=node:node \. /);
+  assert.match(dockerignore, /^\*\*$/m);
+  const workflow = YAML.parse(workflowText);
+  assert.ok(workflow.jobs["distribution-candidate"]);
+  assert.equal(workflow.jobs["distribution-consumer"].strategy["fail-fast"], false);
+  assert.deepEqual(workflow.jobs["distribution-consumer"].strategy.matrix["node-version"], [
+    20,
+    22,
+    24
+  ]);
+  assert.ok(workflow.jobs["distribution-reproducibility"]);
 });
 
 test("release workflow has independently scoped jobs for all channels", async () => {
