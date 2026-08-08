@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -11,6 +12,7 @@ import {
 } from "../../scripts/distribution-policy.js";
 import {
   validateDistributionManifest,
+  validateArchiveIntegrity,
   validatePackOutput
 } from "../../scripts/release-pack-check.js";
 import { validateRelease } from "../../scripts/release-check.js";
@@ -319,6 +321,19 @@ test("distribution manifest binds source, toolchain and per-file digests", () =>
     ...artifactManifest,
     fileSetDigest: `sha256:${"0".repeat(64)}`
   }, manifest), [{ code: "DISTRIBUTION_MANIFEST_DIGEST_INVALID" }]);
+});
+
+test("distribution archive integrity binds the manifest and every payload byte", () => {
+  const bytes = Buffer.from("candidate archive");
+  const pack = {
+    shasum: createHash("sha1").update(bytes).digest("hex"),
+    integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`
+  };
+  assert.deepEqual(validateArchiveIntegrity(bytes, pack), []);
+  assert.deepEqual(validateArchiveIntegrity(Buffer.from("tampered"), pack), [
+    { code: "DISTRIBUTION_ARCHIVE_SHASUM_MISMATCH" },
+    { code: "DISTRIBUTION_ARCHIVE_INTEGRITY_MISMATCH" }
+  ]);
 });
 
 test("container and CI consume the generated tarball without source fallback", async () => {

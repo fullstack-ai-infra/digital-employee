@@ -129,6 +129,19 @@ async function archiveManifest(archivePath) {
   return JSON.parse(stdout);
 }
 
+export function validateArchiveIntegrity(bytes, pack) {
+  const violations = [];
+  const sha1 = createHash("sha1").update(bytes).digest("hex");
+  const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+  if (pack?.shasum !== sha1) {
+    violations.push({ code: "DISTRIBUTION_ARCHIVE_SHASUM_MISMATCH" });
+  }
+  if (pack?.integrity !== integrity) {
+    violations.push({ code: "DISTRIBUTION_ARCHIVE_INTEGRITY_MISMATCH" });
+  }
+  return violations;
+}
+
 async function walkExtractedFiles(directory, prefix = "") {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
@@ -142,6 +155,10 @@ async function walkExtractedFiles(directory, prefix = "") {
 }
 
 async function validateRootArchive({ archivePath, pack, packageManifest }) {
+  const archiveBytes = await readFile(archivePath);
+  const integrityViolations = validateArchiveIntegrity(archiveBytes, pack);
+  if (integrityViolations.length) return { violations: integrityViolations };
+
   let artifactManifest;
   try {
     artifactManifest = await archiveManifest(archivePath);
@@ -165,6 +182,22 @@ async function validateRootArchive({ archivePath, pack, packageManifest }) {
 
   const temporary = await mkdtemp(path.join(os.tmpdir(), "digital-employee-pack-"));
   try {
+    const { stdout: archiveListing } = await execFileAsync("tar", ["-tzf", archivePath], {
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024
+    });
+    const unsafeArchivePath = archiveListing.split("\n").filter(Boolean).find((entry) => {
+      const segments = entry.split("/");
+      return !entry.startsWith("package/") ||
+        entry.includes("\\") ||
+        segments.includes("..") ||
+        path.posix.isAbsolute(entry);
+    });
+    if (unsafeArchivePath) {
+      return {
+        violations: [{ code: "DISTRIBUTION_ARCHIVE_PATH_INVALID", path: unsafeArchivePath }]
+      };
+    }
     await execFileAsync("tar", ["-xzf", archivePath, "-C", temporary]);
     const packageRoot = path.join(temporary, "package");
     const extractedFiles = await walkExtractedFiles(packageRoot);
