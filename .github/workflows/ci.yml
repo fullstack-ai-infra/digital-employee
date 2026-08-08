@@ -129,7 +129,7 @@ jobs:
       - name: Smoke installed CLI without a source checkout
         shell: bash
         run: |
-          package_file="$(find distribution-candidate -maxdepth 1 -name '*digital-employee-0.3.0.tgz' ! -name '*core*' -print -quit)"
+          package_file="$(find distribution-candidate -maxdepth 1 -name 'fullstack-ai-infra-digital-employee-*.tgz' ! -name '*-core-*' -print -quit)"
           test -n "$package_file"
           node distribution-candidate/distribution-smoke.js "$package_file"
 

@@ -25,6 +25,8 @@ node ./scripts/release-pack-check.js \
   "$pack_directory" \
   "$pack_directory/root-pack.json" \
   "$pack_directory/core-pack.json"
+package_file="$(node --input-type=module -e \
+  "import fs from 'node:fs'; const [entry] = JSON.parse(fs.readFileSync('$pack_directory/root-pack.json', 'utf8')); process.stdout.write(entry.filename)")"
 ```
 
 The root tarball contains `dist/distribution-manifest.json`. It records the
@@ -42,7 +44,7 @@ consumer and npm cache, installs only the tarball, runs CLI help and completes
 
 ```bash
 node ./scripts/distribution-smoke.js \
-  "$pack_directory/fullstack-ai-infra-digital-employee-0.3.0.tgz"
+  "$pack_directory/$package_file"
 ```
 
 This is offline package/Schema fixture conformance. It does not evaluate a
@@ -54,7 +56,7 @@ Stage the already verified root tarball at the single Docker input path:
 
 ```bash
 mkdir -p .cache/distribution
-cp "$pack_directory/fullstack-ai-infra-digital-employee-0.3.0.tgz" \
+cp "$pack_directory/$package_file" \
   .cache/distribution/digital-employee-package.tgz
 docker build --tag digital-employee:candidate .
 docker run --rm digital-employee:candidate --help
