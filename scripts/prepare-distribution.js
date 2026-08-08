@@ -141,7 +141,9 @@ async function main() {
     flag: "wx"
   });
   await rename(temporary, destination);
-  process.stdout.write(`${JSON.stringify({
+  // npm pack --json owns stdout. Lifecycle diagnostics must not corrupt its
+  // machine-readable payload.
+  process.stderr.write(`${JSON.stringify({
     schemaVersion: "distribution-prepare-result.v1",
     status: "passed",
     sourceSha,
