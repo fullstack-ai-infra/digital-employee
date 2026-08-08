@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -13,7 +15,8 @@ import {
 import {
   validateDistributionManifest,
   validateArchiveIntegrity,
-  validatePackOutput
+  validatePackOutput,
+  validateRootArchive
 } from "../../scripts/release-pack-check.js";
 import { validateRelease } from "../../scripts/release-check.js";
 
@@ -334,6 +337,97 @@ test("distribution archive integrity binds the manifest and every payload byte",
     { code: "DISTRIBUTION_ARCHIVE_SHASUM_MISMATCH" },
     { code: "DISTRIBUTION_ARCHIVE_INTEGRITY_MISMATCH" }
   ]);
+});
+
+test("real archive missing a declared recipe returns the stable missing code", async (t) => {
+  if (process.platform === "win32") return t.skip("tar fixture is POSIX-only");
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "distribution-missing-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const packageRoot = path.join(temporary, "package");
+  const manifestDirectory = path.join(packageRoot, "dist");
+  await mkdir(manifestDirectory, { recursive: true });
+  const actualPackageManifest = JSON.parse(await readFile(
+    path.join(repositoryRoot, "package.json"),
+    "utf8"
+  ));
+  const missingPath = "dist/examples/recipes/minimal-answer.v1/minimal-answer/employee.json";
+  const files = [{ path: missingPath, size: 2, sha256: createHash("sha256").update("{}", "utf8").digest("hex") }];
+  const artifactManifest = {
+    schemaVersion: "digital-employee-distribution.v1",
+    package: { name: actualPackageManifest.name, version: actualPackageManifest.version },
+    source: { gitCommit: "b".repeat(40), dirty: false },
+    toolchain: { node: "v24.13.0", npm: "11.6.2", typescript: "7.0.2" },
+    digestAlgorithm: "sha256",
+    manifestPath: "dist/distribution-manifest.json",
+    manifestDigestExcluded: true,
+    fileSetDigest: computeDistributionFileSetDigest(files),
+    files
+  };
+  await writeFile(
+    path.join(manifestDirectory, "distribution-manifest.json"),
+    `${JSON.stringify(artifactManifest)}\n`
+  );
+  const archiveFilename = `fullstack-ai-infra-digital-employee-${actualPackageManifest.version}.tgz`;
+  const archivePath = path.join(temporary, archiveFilename);
+  const tar = spawnSync("tar", ["-czf", archivePath, "-C", temporary, "package"], {
+    encoding: "utf8"
+  });
+  assert.equal(tar.status, 0, tar.stderr);
+  const archiveBytes = await readFile(archivePath);
+  const pack = {
+    name: actualPackageManifest.name,
+    version: actualPackageManifest.version,
+    filename: archiveFilename,
+    shasum: createHash("sha1").update(archiveBytes).digest("hex"),
+    integrity: `sha512-${createHash("sha512").update(archiveBytes).digest("base64")}`,
+    files: [
+      { path: "dist/distribution-manifest.json" },
+      { path: missingPath }
+    ]
+  };
+  assert.deepEqual(await validateRootArchive({
+    archivePath,
+    pack,
+    packageManifest: actualPackageManifest
+  }), {
+    violations: [{
+      code: "DISTRIBUTION_REQUIRED_FILE_MISSING",
+      path: missingPath
+    }]
+  });
+
+  const coreManifest = JSON.parse(await readFile(
+    path.join(repositoryRoot, "packages", "core", "package.json"),
+    "utf8"
+  ));
+  const coreFilename = `fullstack-ai-infra-digital-employee-core-${coreManifest.version}.tgz`;
+  await writeFile(path.join(temporary, coreFilename), "core archive fixture");
+  const rootOutput = path.join(temporary, "root-pack.json");
+  const coreOutput = path.join(temporary, "core-pack.json");
+  await writeFile(rootOutput, JSON.stringify([pack]));
+  await writeFile(coreOutput, JSON.stringify([{
+    name: coreManifest.name,
+    version: coreManifest.version,
+    filename: coreFilename,
+    files: [
+      { path: "package.json" },
+      { path: "dist/index.js" },
+      { path: "dist/index.d.ts" }
+    ]
+  }]));
+  const cli = spawnSync(process.execPath, [
+    path.join(repositoryRoot, "scripts", "release-pack-check.js"),
+    temporary,
+    rootOutput,
+    coreOutput
+  ], { encoding: "utf8" });
+  assert.equal(cli.status, 1, cli.stderr);
+  const result = JSON.parse(cli.stderr);
+  assert.ok(result.violations.some((violation: { code: string; path?: string }) =>
+    violation.code === "DISTRIBUTION_REQUIRED_FILE_MISSING" &&
+    violation.path === missingPath
+  ));
+  assert.doesNotMatch(cli.stderr, /ENOENT/);
 });
 
 test("container and CI consume the generated tarball without source fallback", async () => {

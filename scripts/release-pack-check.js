@@ -154,7 +154,7 @@ async function walkExtractedFiles(directory, prefix = "") {
   return files;
 }
 
-async function validateRootArchive({ archivePath, pack, packageManifest }) {
+export async function validateRootArchive({ archivePath, pack, packageManifest }) {
   const archiveBytes = await readFile(archivePath);
   const integrityViolations = validateArchiveIntegrity(archiveBytes, pack);
   if (integrityViolations.length) return { violations: integrityViolations };
@@ -202,6 +202,7 @@ async function validateRootArchive({ archivePath, pack, packageManifest }) {
     const packageRoot = path.join(temporary, "package");
     const extractedFiles = await walkExtractedFiles(packageRoot);
     violations.push(...validateCandidateFileSet(expectedFiles, extractedFiles));
+    if (violations.length) return { violations };
     const expectedByPath = new Map(artifactManifest.files.map((file) => [file.path, file]));
     for (const [filePath, expected] of expectedByPath) {
       const bytes = await readFile(path.join(packageRoot, filePath));
