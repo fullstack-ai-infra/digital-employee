@@ -4,6 +4,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
+import {
+  compiledDistributionFiles,
+  validateCandidateFileSet
+} from "../../scripts/distribution-policy.js";
 import { validatePackOutput } from "../../scripts/release-pack-check.js";
 import { validateRelease } from "../../scripts/release-check.js";
 
@@ -245,6 +249,41 @@ test("pack check rejects unexpected source paths", () => {
     allowedPrefixes: ["dist/"],
     allowedPatterns: [/^README[^/]*\.md$/]
   }), ["root npm pack includes unexpected packages/core/index.ts"]);
+});
+
+test("distribution policy maps only tracked runtime TypeScript outputs", () => {
+  assert.deepEqual(compiledDistributionFiles([
+    "apps/cli/bin.ts",
+    "tests/apps/cli.test.ts",
+    "types/json.d.ts"
+  ]), [
+    "dist/apps/cli/bin.d.ts",
+    "dist/apps/cli/bin.d.ts.map",
+    "dist/apps/cli/bin.js",
+    "dist/apps/cli/bin.js.map"
+  ]);
+});
+
+test("distribution policy rejects missing, undeclared and credential-shaped files", () => {
+  const expected = ["dist/apps/cli/bin.js", "dist/locales/en.json"];
+  assert.deepEqual(validateCandidateFileSet(expected, ["dist/apps/cli/bin.js"]), [{
+    code: "DISTRIBUTION_REQUIRED_FILE_MISSING",
+    path: "dist/locales/en.json"
+  }]);
+  assert.deepEqual(validateCandidateFileSet(expected, [
+    ...expected,
+    "dist/undeclared.txt"
+  ]), [{
+    code: "DISTRIBUTION_UNDECLARED_FILE",
+    path: "dist/undeclared.txt"
+  }]);
+  assert.deepEqual(validateCandidateFileSet(expected, [
+    ...expected,
+    "dist/config/credentials.json"
+  ]), [{
+    code: "DISTRIBUTION_CREDENTIAL_PATH_FORBIDDEN",
+    path: "dist/config/credentials.json"
+  }]);
 });
 
 test("release workflow has independently scoped jobs for all channels", async () => {
