@@ -106,7 +106,7 @@ function manifestViolations(manifest, packageManifest) {
       file.size < 0 ||
       !/^[0-9a-f]{64}$/.test(file.sha256 ?? "") ||
       file.path === DISTRIBUTION_MANIFEST_PATH ||
-      file.path <= previous ||
+      (previous && previous.localeCompare(file.path, "en") >= 0) ||
       seen.has(file.path)
     ) {
       violations.push({ code: "DISTRIBUTION_MANIFEST_FILE_INVALID", path: file?.path });
