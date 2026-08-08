@@ -167,13 +167,15 @@ docker run --rm -p 3000:3000 \
   ghcr.io/fullstack-ai-infra/digital-employee:0.1.0
 ```
 
-The current source `Dockerfile` is instead a generic CLI base image and defaults
-to help. Enter `legacy` explicitly only when testing the compatibility runtime:
+The current source `Dockerfile` installs an already verified npm candidate and
+defaults to help. It does not rebuild from the source checkout. Follow the
+[candidate build and staging steps](docs/distribution.md), then enter `legacy`
+explicitly only when testing the compatibility runtime:
 
 ```bash
-docker build -t digital-employee:source .
-docker run --rm digital-employee:source
-docker run --rm -p 3000:3000 digital-employee:source \
+docker build -t digital-employee:candidate .
+docker run --rm digital-employee:candidate
+docker run --rm -p 3000:3000 digital-employee:candidate \
   legacy serve --config ./dist/configs/demo.json --host 0.0.0.0 --port 3000
 ```
 

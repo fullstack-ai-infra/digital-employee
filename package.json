@@ -38,14 +38,13 @@
   ],
   "files": [
     "dist",
-    "locales",
     "README.md",
     "README.zh-CN.md",
     "LICENSE",
     "NOTICE"
   ],
   "scripts": {
-    "build": "tsc --project tsconfig.build.json && node ./scripts/copy-build-assets.js",
+    "build": "node ./scripts/clean-build-output.js && tsc --project tsconfig.build.json && node ./scripts/copy-build-assets.js",
     "typecheck": "tsc --project tsconfig.json && tsc --project tsconfig.test.json",
     "ask": "npm run build --silent && node ./dist/apps/cli/bin.js ask",
     "demo": "npm run build --silent && node ./dist/apps/cli/bin.js ask --config ./dist/configs/demo.json",
@@ -66,7 +65,9 @@
     "test:coverage": "tsx --test --experimental-test-coverage --test-concurrency=1 --test-coverage-include='apps/**/*.ts' --test-coverage-include='connectors/**/*.ts' --test-coverage-include='packages/**/*.ts' --test-coverage-include='profiles/**/*.ts' --test-coverage-include='scripts/**/*.js' --test-coverage-lines=85 --test-coverage-branches=65 --test-coverage-functions=80 tests/**/*.test.ts",
     "security:check": "node ./scripts/security-check.js",
     "release:check": "node ./scripts/release-check.js",
-    "prepack": "npm run build",
+    "distribution:prepare": "npm run build && node ./scripts/prepare-distribution.js",
+    "distribution:smoke": "node ./scripts/distribution-smoke.js",
+    "prepack": "npm run distribution:prepare",
     "prepublishOnly": "npm run check && npm run release:check",
     "check": "npm run typecheck && npm run build && npm test && npm run security:check"
   },

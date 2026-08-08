@@ -81,7 +81,7 @@ test("default npm and container entry points stay on the Agent-native CLI", asyn
   const dockerfile = await readFile(path.join(root, "Dockerfile"), "utf8")
   assert.match(
     dockerfile,
-    /ENTRYPOINT \["node", "\.\/dist\/apps\/cli\/bin\.js"\]/,
+    /ENTRYPOINT \["node", "\.\/node_modules\/@fullstack-ai-infra\/digital-employee\/dist\/apps\/cli\/bin\.js"\]/,
   )
   assert.match(dockerfile, /CMD \["--help"\]/)
   assert.doesNotMatch(dockerfile, /^CMD .*legacy/m)

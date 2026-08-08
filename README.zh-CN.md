@@ -90,12 +90,12 @@ docker run --rm -p 3000:3000 \
   ghcr.io/fullstack-ai-infra/digital-employee:0.1.0
 ```
 
-当前源码的 `Dockerfile` 已改为通用 CLI 基础镜像，默认只显示帮助；只有明确测试兼容运行时时才进入 `legacy`：
+当前源码的 `Dockerfile` 只安装已经验证的 npm 候选制品，不会重新从源码树构建，默认只显示帮助。先按[候选制品构建与暂存步骤](docs/distribution.md)准备同一个 tarball；只有明确测试兼容运行时时才进入 `legacy`：
 
 ```bash
-docker build -t digital-employee:source .
-docker run --rm digital-employee:source
-docker run --rm -p 3000:3000 digital-employee:source \
+docker build -t digital-employee:candidate .
+docker run --rm digital-employee:candidate
+docker run --rm -p 3000:3000 digital-employee:candidate \
   legacy serve --config ./dist/configs/demo.json --host 0.0.0.0 --port 3000
 ```
 

@@ -137,6 +137,19 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci
+      - name: Stage the declared npm candidate for the container
+        shell: bash
+        run: |
+          pack_destination="$RUNNER_TEMP/ghcr-pack"
+          mkdir -p "$pack_destination" .cache/distribution
+          npm pack --json --pack-destination "$pack_destination" > "$RUNNER_TEMP/ghcr-root-pack.json"
+          package_file="$(node --input-type=module -e "import fs from 'node:fs'; const [entry] = JSON.parse(fs.readFileSync('$RUNNER_TEMP/ghcr-root-pack.json', 'utf8')); process.stdout.write(entry.filename)")"
+          cp "$pack_destination/$package_file" .cache/distribution/digital-employee-package.tgz
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ github.token }}

@@ -44,13 +44,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci
+      - name: Build and verify the container candidate
+        shell: bash
+        run: |
+          pack_destination="$RUNNER_TEMP/distribution-pack"
+          mkdir -p "$pack_destination" .cache/distribution
+          npm pack --json --pack-destination "$pack_destination" > "$RUNNER_TEMP/root-pack.json"
+          npm pack ./packages/core --json --pack-destination "$pack_destination" > "$RUNNER_TEMP/core-pack.json"
+          node ./scripts/release-pack-check.js \
+            "$pack_destination" \
+            "$RUNNER_TEMP/root-pack.json" \
+            "$RUNNER_TEMP/core-pack.json"
+          package_file="$(node --input-type=module -e "import fs from 'node:fs'; const [entry] = JSON.parse(fs.readFileSync('$RUNNER_TEMP/root-pack.json', 'utf8')); process.stdout.write(entry.filename)")"
+          cp "$pack_destination/$package_file" .cache/distribution/digital-employee-package.tgz
       - run: docker build --tag digital-employee:ci .
       - name: Verify default Agent-native entry point
         run: docker run --rm digital-employee:ci | grep --fixed-strings "Agent-native usage:"
       - name: Verify explicit standalone-v1 health endpoint
         run: |
-          container_id="$(docker run --detach --rm --publish 127.0.0.1:3000:3000 digital-employee:ci legacy serve --config ./dist/configs/demo.json --host 0.0.0.0 --port 3000)"
-          trap 'docker stop "$container_id" >/dev/null 2>&1 || true' EXIT
+          container_name="digital-employee-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container_id="$(docker run --detach --name "$container_name" --publish 127.0.0.1:3000:3000 digital-employee:ci legacy serve --config ./node_modules/@fullstack-ai-infra/digital-employee/dist/configs/demo.json --host 0.0.0.0 --port 3000)"
+          trap 'docker rm --force "$container_name" >/dev/null 2>&1 || true' EXIT
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
             if curl --fail --silent http://127.0.0.1:3000/health; then
               exit 0
@@ -59,3 +78,88 @@ jobs:
           done
           docker logs "$container_id"
           exit 1
+
+  distribution-candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci
+      - name: Build, verify and smoke the candidate tarball
+        shell: bash
+        run: |
+          artifact_directory="$RUNNER_TEMP/distribution-artifact"
+          mkdir -p "$artifact_directory"
+          npm pack --json --pack-destination "$artifact_directory" > "$RUNNER_TEMP/root-pack.json"
+          npm pack ./packages/core --json --pack-destination "$artifact_directory" > "$RUNNER_TEMP/core-pack.json"
+          node ./scripts/release-pack-check.js \
+            "$artifact_directory" \
+            "$RUNNER_TEMP/root-pack.json" \
+            "$RUNNER_TEMP/core-pack.json"
+          package_file="$(node --input-type=module -e "import fs from 'node:fs'; const [entry] = JSON.parse(fs.readFileSync('$RUNNER_TEMP/root-pack.json', 'utf8')); process.stdout.write(entry.filename)")"
+          node ./scripts/distribution-smoke.js "$artifact_directory/$package_file"
+          cp ./scripts/distribution-smoke.js "$artifact_directory/distribution-smoke.js"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-employee-distribution-candidate
+          path: ${{ runner.temp }}/distribution-artifact
+          if-no-files-found: error
+
+  distribution-consumer:
+    needs: distribution-candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - 20
+          - 22
+          - 24
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: digital-employee-distribution-candidate
+          path: distribution-candidate
+      - name: Smoke installed CLI without a source checkout
+        shell: bash
+        run: |
+          package_file="$(find distribution-candidate -maxdepth 1 -name 'fullstack-ai-infra-digital-employee-*.tgz' ! -name '*-core-*' -print -quit)"
+          test -n "$package_file"
+          node distribution-candidate/distribution-smoke.js "$package_file"
+
+  distribution-reproducibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: candidate-a
+      - uses: actions/checkout@v6
+        with:
+          path: candidate-b
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Compare two clean checkout payload manifests
+        shell: bash
+        run: |
+          for candidate in candidate-a candidate-b; do
+            mkdir -p "$RUNNER_TEMP/$candidate"
+            (
+              cd "$candidate"
+              npm ci
+              npm pack --json --pack-destination "$RUNNER_TEMP/$candidate" > "$RUNNER_TEMP/$candidate-pack.json"
+            )
+          done
+          file_a="$(node --input-type=module -e "import fs from 'node:fs'; const [entry] = JSON.parse(fs.readFileSync('$RUNNER_TEMP/candidate-a-pack.json', 'utf8')); process.stdout.write(entry.filename)")"
+          file_b="$(node --input-type=module -e "import fs from 'node:fs'; const [entry] = JSON.parse(fs.readFileSync('$RUNNER_TEMP/candidate-b-pack.json', 'utf8')); process.stdout.write(entry.filename)")"
+          tar -xOzf "$RUNNER_TEMP/candidate-a/$file_a" package/dist/distribution-manifest.json > "$RUNNER_TEMP/manifest-a.json"
+          tar -xOzf "$RUNNER_TEMP/candidate-b/$file_b" package/dist/distribution-manifest.json > "$RUNNER_TEMP/manifest-b.json"
+          cmp "$RUNNER_TEMP/manifest-a.json" "$RUNNER_TEMP/manifest-b.json"
