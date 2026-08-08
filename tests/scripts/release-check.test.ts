@@ -15,8 +15,7 @@ import {
 import {
   validateDistributionManifest,
   validateArchiveIntegrity,
-  validatePackOutput,
-  validateRootArchive
+  validatePackOutput
 } from "../../scripts/release-pack-check.js";
 import { validateRelease } from "../../scripts/release-check.js";
 
@@ -339,95 +338,138 @@ test("distribution archive integrity binds the manifest and every payload byte",
   ]);
 });
 
-test("real archive missing a declared recipe returns the stable missing code", async (t) => {
-  if (process.platform === "win32") return t.skip("tar fixture is POSIX-only");
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "distribution-missing-"));
+test("real package archives fail closed for missing, extra and credential paths", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "distribution-negative-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
-  const packageRoot = path.join(temporary, "package");
-  const manifestDirectory = path.join(packageRoot, "dist");
-  await mkdir(manifestDirectory, { recursive: true });
   const actualPackageManifest = JSON.parse(await readFile(
     path.join(repositoryRoot, "package.json"),
     "utf8"
   ));
-  const missingPath = "dist/examples/recipes/minimal-answer.v1/minimal-answer/employee.json";
-  const files = [{ path: missingPath, size: 2, sha256: createHash("sha256").update("{}", "utf8").digest("hex") }];
-  const artifactManifest = {
-    schemaVersion: "digital-employee-distribution.v1",
-    package: { name: actualPackageManifest.name, version: actualPackageManifest.version },
-    source: { gitCommit: "b".repeat(40), dirty: false },
-    toolchain: { node: "v24.13.0", npm: "11.6.2", typescript: "7.0.2" },
-    digestAlgorithm: "sha256",
-    manifestPath: "dist/distribution-manifest.json",
-    manifestDigestExcluded: true,
-    fileSetDigest: computeDistributionFileSetDigest(files),
-    files
-  };
-  await writeFile(
-    path.join(manifestDirectory, "distribution-manifest.json"),
-    `${JSON.stringify(artifactManifest)}\n`
-  );
-  const archiveFilename = `fullstack-ai-infra-digital-employee-${actualPackageManifest.version}.tgz`;
-  const archivePath = path.join(temporary, archiveFilename);
-  const tar = spawnSync("tar", ["-czf", archivePath, "-C", temporary, "package"], {
-    encoding: "utf8"
-  });
-  assert.equal(tar.status, 0, tar.stderr);
-  const archiveBytes = await readFile(archivePath);
-  const pack = {
-    name: actualPackageManifest.name,
-    version: actualPackageManifest.version,
-    filename: archiveFilename,
-    shasum: createHash("sha1").update(archiveBytes).digest("hex"),
-    integrity: `sha512-${createHash("sha512").update(archiveBytes).digest("base64")}`,
-    files: [
-      { path: "dist/distribution-manifest.json" },
-      { path: missingPath }
-    ]
-  };
-  assert.deepEqual(await validateRootArchive({
-    archivePath,
-    pack,
-    packageManifest: actualPackageManifest
-  }), {
-    violations: [{
-      code: "DISTRIBUTION_REQUIRED_FILE_MISSING",
-      path: missingPath
-    }]
-  });
-
   const coreManifest = JSON.parse(await readFile(
     path.join(repositoryRoot, "packages", "core", "package.json"),
     "utf8"
   ));
-  const coreFilename = `fullstack-ai-infra-digital-employee-core-${coreManifest.version}.tgz`;
-  await writeFile(path.join(temporary, coreFilename), "core archive fixture");
-  const rootOutput = path.join(temporary, "root-pack.json");
-  const coreOutput = path.join(temporary, "core-pack.json");
-  await writeFile(rootOutput, JSON.stringify([pack]));
-  await writeFile(coreOutput, JSON.stringify([{
-    name: coreManifest.name,
-    version: coreManifest.version,
-    filename: coreFilename,
-    files: [
-      { path: "package.json" },
-      { path: "dist/index.js" },
-      { path: "dist/index.d.ts" }
-    ]
-  }]));
-  const cli = spawnSync(process.execPath, [
-    path.join(repositoryRoot, "scripts", "release-pack-check.js"),
-    temporary,
-    rootOutput,
-    coreOutput
-  ], { encoding: "utf8" });
-  assert.equal(cli.status, 1, cli.stderr);
-  const result = JSON.parse(cli.stderr);
-  assert.ok(result.violations.some((violation: { code: string; path?: string }) =>
-    violation.code === "DISTRIBUTION_REQUIRED_FILE_MISSING" &&
-    violation.path === missingPath
-  ));
-  assert.doesNotMatch(cli.stderr, /ENOENT/);
+  const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+  const cases = [
+    {
+      id: "missing-recipe",
+      path: "dist/examples/recipes/minimal-answer.v1/minimal-answer/employee.json",
+      code: "DISTRIBUTION_REQUIRED_FILE_MISSING",
+      missing: true
+    },
+    {
+      id: "missing-locale",
+      path: "dist/locales/ja.json",
+      code: "DISTRIBUTION_REQUIRED_FILE_MISSING",
+      missing: true
+    },
+    {
+      id: "undeclared-file",
+      path: "dist/undeclared.txt",
+      code: "DISTRIBUTION_UNDECLARED_FILE",
+      missing: false
+    },
+    {
+      id: "credential-path",
+      path: "dist/config/credentials.json",
+      code: "DISTRIBUTION_CREDENTIAL_PATH_FORBIDDEN",
+      missing: false
+    }
+  ];
+
+  for (const negative of cases) {
+    const caseRoot = path.join(temporary, negative.id);
+    const packageRoot = path.join(caseRoot, "source");
+    const manifestDirectory = path.join(packageRoot, "dist");
+    await mkdir(manifestDirectory, { recursive: true });
+    const fixturePackageJson = `${JSON.stringify({
+      name: actualPackageManifest.name,
+      version: actualPackageManifest.version,
+      type: "module",
+      files: ["dist"]
+    }, null, 2)}\n`;
+    await writeFile(path.join(packageRoot, "package.json"), fixturePackageJson);
+    if (!negative.missing) {
+      const injected = path.join(packageRoot, negative.path);
+      await mkdir(path.dirname(injected), { recursive: true });
+      await writeFile(injected, "synthetic public fixture\n");
+    }
+    const files = [{
+      path: "package.json",
+      size: Buffer.byteLength(fixturePackageJson),
+      sha256: createHash("sha256").update(fixturePackageJson).digest("hex")
+    }];
+    if (negative.missing) {
+      files.push({
+        path: negative.path,
+        size: 2,
+        sha256: createHash("sha256").update("{}", "utf8").digest("hex")
+      });
+    }
+    files.sort((left, right) => left.path.localeCompare(right.path, "en"));
+    const artifactManifest = {
+      schemaVersion: "digital-employee-distribution.v1",
+      package: { name: actualPackageManifest.name, version: actualPackageManifest.version },
+      source: { gitCommit: "b".repeat(40), dirty: false },
+      toolchain: { node: "v24.13.0", npm: "11.6.2", typescript: "7.0.2" },
+      digestAlgorithm: "sha256",
+      manifestPath: "dist/distribution-manifest.json",
+      manifestDigestExcluded: true,
+      fileSetDigest: computeDistributionFileSetDigest(files),
+      files
+    };
+    await writeFile(
+      path.join(manifestDirectory, "distribution-manifest.json"),
+      `${JSON.stringify(artifactManifest)}\n`
+    );
+
+    const packed = spawnSync(npmCommand, [
+      "pack",
+      packageRoot,
+      "--ignore-scripts",
+      "--json",
+      "--pack-destination",
+      caseRoot
+    ], { encoding: "utf8" });
+    assert.equal(packed.status, 0, packed.stderr);
+    const [pack] = JSON.parse(packed.stdout);
+    if (negative.missing) {
+      pack.files = [
+        ...files.map((file) => ({ path: file.path })),
+        { path: "dist/distribution-manifest.json" }
+      ];
+    }
+
+    const coreFilename = `fullstack-ai-infra-digital-employee-core-${coreManifest.version}.tgz`;
+    await writeFile(path.join(caseRoot, coreFilename), "core archive fixture");
+    const rootOutput = path.join(caseRoot, "root-pack.json");
+    const coreOutput = path.join(caseRoot, "core-pack.json");
+    await writeFile(rootOutput, JSON.stringify([pack]));
+    await writeFile(coreOutput, JSON.stringify([{
+      name: coreManifest.name,
+      version: coreManifest.version,
+      filename: coreFilename,
+      files: [
+        { path: "package.json" },
+        { path: "dist/index.js" },
+        { path: "dist/index.d.ts" }
+      ]
+    }]));
+    const cli = spawnSync(process.execPath, [
+      path.join(repositoryRoot, "scripts", "release-pack-check.js"),
+      caseRoot,
+      rootOutput,
+      coreOutput
+    ], { encoding: "utf8" });
+    assert.equal(cli.status, 1, cli.stderr);
+    const result = JSON.parse(cli.stderr);
+    assert.equal(result.schemaVersion, "distribution-verification-result.v1");
+    assert.equal(result.status, "failed");
+    assert.ok(result.violations.some((violation: { code: string; path?: string }) =>
+      violation.code === negative.code && violation.path === negative.path
+    ));
+    assert.doesNotMatch(cli.stderr, /ENOENT|release-pack-check:/);
+  }
 });
 
 test("container and CI consume the generated tarball without source fallback", async () => {
@@ -448,6 +490,13 @@ test("container and CI consume the generated tarball without source fallback", a
     24
   ]);
   assert.ok(workflow.jobs["distribution-reproducibility"]);
+  assert.match(workflowText, /cd "\$candidate"[\s\S]*npm pack --json/);
+  assert.doesNotMatch(workflowText, /npm --prefix "\$candidate" pack/);
+  assert.match(
+    workflowText,
+    /--config \.\/node_modules\/@fullstack-ai-infra\/digital-employee\/dist\/configs\/demo\.json/
+  );
+  assert.doesNotMatch(workflowText, /docker run --detach --rm/);
 });
 
 test("release workflow has independently scoped jobs for all channels", async () => {

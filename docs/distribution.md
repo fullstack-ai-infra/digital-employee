@@ -63,5 +63,7 @@ docker run --rm digital-employee:candidate --help
 ```
 
 `.dockerignore` rejects every other source path from the context. CI repeats
-the installed smoke on Node 20, 22 and 24 and compares two independently built
-clean-checkout tarballs and manifests byte for byte.
+the installed smoke on Node 20, 22 and 24 and compares the payload manifest and
+every declared file digest from two independently built clean checkouts. The
+npm tar container encoding is not a cross-toolchain byte-reproducibility
+contract.

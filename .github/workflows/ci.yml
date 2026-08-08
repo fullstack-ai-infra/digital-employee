@@ -67,8 +67,9 @@ jobs:
         run: docker run --rm digital-employee:ci | grep --fixed-strings "Agent-native usage:"
       - name: Verify explicit standalone-v1 health endpoint
         run: |
-          container_id="$(docker run --detach --rm --publish 127.0.0.1:3000:3000 digital-employee:ci legacy serve --config ./dist/configs/demo.json --host 0.0.0.0 --port 3000)"
-          trap 'docker stop "$container_id" >/dev/null 2>&1 || true' EXIT
+          container_name="digital-employee-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container_id="$(docker run --detach --name "$container_name" --publish 127.0.0.1:3000:3000 digital-employee:ci legacy serve --config ./node_modules/@fullstack-ai-infra/digital-employee/dist/configs/demo.json --host 0.0.0.0 --port 3000)"
+          trap 'docker rm --force "$container_name" >/dev/null 2>&1 || true' EXIT
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
             if curl --fail --silent http://127.0.0.1:3000/health; then
               exit 0
@@ -146,17 +147,19 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      - name: Compare two clean checkout candidates
+      - name: Compare two clean checkout payload manifests
         shell: bash
         run: |
           for candidate in candidate-a candidate-b; do
-            npm --prefix "$candidate" ci
             mkdir -p "$RUNNER_TEMP/$candidate"
-            npm --prefix "$candidate" pack --json --pack-destination "$RUNNER_TEMP/$candidate" > "$RUNNER_TEMP/$candidate-pack.json"
+            (
+              cd "$candidate"
+              npm ci
+              npm pack --json --pack-destination "$RUNNER_TEMP/$candidate" > "$RUNNER_TEMP/$candidate-pack.json"
+            )
           done
           file_a="$(node --input-type=module -e "import fs from 'node:fs'; const [entry] = JSON.parse(fs.readFileSync('$RUNNER_TEMP/candidate-a-pack.json', 'utf8')); process.stdout.write(entry.filename)")"
           file_b="$(node --input-type=module -e "import fs from 'node:fs'; const [entry] = JSON.parse(fs.readFileSync('$RUNNER_TEMP/candidate-b-pack.json', 'utf8')); process.stdout.write(entry.filename)")"
-          cmp "$RUNNER_TEMP/candidate-a/$file_a" "$RUNNER_TEMP/candidate-b/$file_b"
           tar -xOzf "$RUNNER_TEMP/candidate-a/$file_a" package/dist/distribution-manifest.json > "$RUNNER_TEMP/manifest-a.json"
           tar -xOzf "$RUNNER_TEMP/candidate-b/$file_b" package/dist/distribution-manifest.json > "$RUNNER_TEMP/manifest-b.json"
           cmp "$RUNNER_TEMP/manifest-a.json" "$RUNNER_TEMP/manifest-b.json"
