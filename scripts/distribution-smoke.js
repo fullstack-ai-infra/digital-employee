@@ -57,7 +57,50 @@ function assertExactKeys(value, keys, code) {
   }
 }
 
-function assertEvalResult(result, expectedStatus) {
+const RECIPE_CONTRACTS = Object.freeze([
+  Object.freeze({
+    recipe: "minimal-answer.v1",
+    directory: "minimal-answer",
+    employee: Object.freeze({
+      name: "minimal-answer",
+      version: "0.1.0",
+      schemaVersion: "employee-package.v1alpha1"
+    })
+  }),
+  Object.freeze({
+    recipe: "structured-action.v1",
+    directory: "structured-action",
+    employee: Object.freeze({
+      name: "structured-action",
+      version: "0.1.0",
+      schemaVersion: "employee-package.v1alpha1"
+    })
+  })
+]);
+
+const INITIALIZED_FILES = Object.freeze([
+  "./employee.json",
+  "./SKILL.md",
+  "./schemas/input.schema.json",
+  "./schemas/output.schema.json",
+  "./knowledge/README.md",
+  "./evals/cases.json"
+]);
+
+function assertEmployeeIdentity(employee, expected, code) {
+  if (
+    !employee ||
+    typeof employee !== "object" ||
+    Array.isArray(employee) ||
+    employee.name !== expected.name ||
+    employee.version !== expected.version ||
+    employee.schemaVersion !== expected.schemaVersion
+  ) {
+    throw new TypeError(code);
+  }
+}
+
+function assertEvalResult(result, expectedStatus, expectedEmployee) {
   assertExactKeys(result, [
     "schemaVersion",
     "status",
@@ -71,6 +114,11 @@ function assertEvalResult(result, expectedStatus) {
     "version",
     "schemaVersion"
   ], "distribution_smoke_eval_employee_invalid");
+  assertEmployeeIdentity(
+    result.employee,
+    expectedEmployee,
+    "distribution_smoke_eval_employee_invalid"
+  );
   assertExactKeys(result.summary, [
     "total",
     "passed",
@@ -152,8 +200,9 @@ async function main() {
 
     const recipes = [];
     let negativeEvalCode;
-    for (const recipe of ["minimal-answer.v1", "structured-action.v1"]) {
-      const target = path.join(consumer, recipe.replace(".v1", ""));
+    for (const contract of RECIPE_CONTRACTS) {
+      const { employee, recipe } = contract;
+      const target = path.join(consumer, contract.directory);
       const initialized = parseJsonOutput("init", run(process.execPath, [
         cli,
         "init",
@@ -172,13 +221,15 @@ async function main() {
         initialized.recipe !== recipe ||
         initialized.directory !== target ||
         !Array.isArray(initialized.files) ||
-        initialized.files.length === 0 ||
-        typeof initialized.manifest?.name !== "string" ||
-        typeof initialized.manifest?.version !== "string" ||
-        initialized.manifest?.schemaVersion !== "employee-package.v1alpha1"
+        JSON.stringify(initialized.files) !== JSON.stringify(INITIALIZED_FILES)
       ) {
         throw new TypeError(`distribution_smoke_init_contract_invalid:${recipe}`);
       }
+      assertEmployeeIdentity(
+        initialized.manifest,
+        employee,
+        `distribution_smoke_init_identity_invalid:${recipe}`
+      );
 
       const validation = parseJsonOutput(
         "validate",
@@ -190,14 +241,15 @@ async function main() {
         "version",
         "schemaVersion"
       ], "distribution_smoke_validate_employee_invalid");
+      assertEmployeeIdentity(
+        validation.employee,
+        employee,
+        `distribution_smoke_validate_identity_invalid:${recipe}`
+      );
       if (
         validation.status !== "valid" ||
-        validation.employee.name !== initialized.manifest.name ||
-        validation.employee.version !== initialized.manifest.version ||
-        validation.employee.schemaVersion !== "employee-package.v1alpha1" ||
         !Array.isArray(validation.files) ||
-        initialized.files[0] !== "./employee.json" ||
-        JSON.stringify(validation.files) !== JSON.stringify(initialized.files.slice(1))
+        JSON.stringify(validation.files) !== JSON.stringify(INITIALIZED_FILES.slice(1))
       ) {
         throw new TypeError(`distribution_smoke_validate_contract_invalid:${recipe}`);
       }
@@ -206,7 +258,7 @@ async function main() {
         "eval",
         run(process.execPath, [cli, "eval", target, "--json"], { cwd: consumer })
       );
-      assertEvalResult(evaluation, "passed");
+      assertEvalResult(evaluation, "passed", employee);
       if (
         evaluation.code !== "EVAL_PASSED" ||
         evaluation.summary.passed !== 1 ||
@@ -216,7 +268,12 @@ async function main() {
       ) {
         throw new TypeError(`distribution_smoke_eval_failed:${recipe}`);
       }
-      recipes.push({ recipe, caseCount: evaluation.cases.length });
+      recipes.push({
+        recipe,
+        employee,
+        fileCount: initialized.files.length,
+        caseCount: evaluation.cases.length
+      });
 
       if (recipe === "minimal-answer.v1") {
         const casesPath = path.join(target, "evals", "cases.json");
@@ -232,7 +289,7 @@ async function main() {
           throw new TypeError("distribution_smoke_negative_exit_invalid");
         }
         const failedEvaluation = parseJsonOutput("eval-negative", failedProcess.stdout);
-        assertEvalResult(failedEvaluation, "failed");
+        assertEvalResult(failedEvaluation, "failed", employee);
         if (
           failedEvaluation.code !== "EVAL_CASE_INPUT_SCHEMA_INVALID" ||
           failedEvaluation.summary.passed !== 0 ||

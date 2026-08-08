@@ -473,10 +473,12 @@ test("real package archives fail closed for missing, extra and credential paths"
 });
 
 test("container and CI consume the generated tarball without source fallback", async () => {
-  const [dockerfile, dockerignore, workflowText] = await Promise.all([
+  const [dockerfile, dockerignore, workflowText, readme, readmeZh] = await Promise.all([
     readFile(path.join(repositoryRoot, "Dockerfile"), "utf8"),
     readFile(path.join(repositoryRoot, ".dockerignore"), "utf8"),
-    readFile(path.join(repositoryRoot, ".github/workflows/ci.yml"), "utf8")
+    readFile(path.join(repositoryRoot, ".github/workflows/ci.yml"), "utf8"),
+    readFile(path.join(repositoryRoot, "README.md"), "utf8"),
+    readFile(path.join(repositoryRoot, "README.zh-CN.md"), "utf8")
   ]);
   assert.match(dockerfile, /COPY --chown=node:node \.cache\/distribution\/digital-employee-package\.tgz/);
   assert.doesNotMatch(dockerfile, /COPY --chown=node:node \. /);
@@ -497,6 +499,13 @@ test("container and CI consume the generated tarball without source fallback", a
     /--config \.\/node_modules\/@fullstack-ai-infra\/digital-employee\/dist\/configs\/demo\.json/
   );
   assert.doesNotMatch(workflowText, /docker run --detach --rm/);
+  for (const documentation of [readme, readmeZh]) {
+    assert.match(
+      documentation,
+      /--config \.\/node_modules\/@fullstack-ai-infra\/digital-employee\/dist\/configs\/demo\.json/
+    );
+    assert.doesNotMatch(documentation, /--config \.\/dist\/configs\/demo\.json/);
+  }
 });
 
 test("release workflow has independently scoped jobs for all channels", async () => {

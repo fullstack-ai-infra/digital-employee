@@ -176,7 +176,9 @@ explicitly only when testing the compatibility runtime:
 docker build -t digital-employee:candidate .
 docker run --rm digital-employee:candidate
 docker run --rm -p 3000:3000 digital-employee:candidate \
-  legacy serve --config ./dist/configs/demo.json --host 0.0.0.0 --port 3000
+  legacy serve \
+  --config ./node_modules/@fullstack-ai-infra/digital-employee/dist/configs/demo.json \
+  --host 0.0.0.0 --port 3000
 ```
 
 ## Not one bot and not another Agent loop
