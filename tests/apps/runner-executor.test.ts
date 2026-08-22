@@ -28,6 +28,7 @@ import {
 } from "../../packages/core/src/runner-protocol.js"
 import type { RunnerTaskPayload } from "../../packages/core/src/runner-protocol.js"
 import { InMemoryRunnerReplayGuard } from "../../packages/core/src/runner-replay-guard.js"
+import type { RunnerReplayClaim } from "../../packages/core/src/runner-replay-guard.js"
 import { RunnerLeaseState } from "../../packages/core/src/runner-lease.js"
 
 function readyProbe(): AgentHostProbeResult {
@@ -240,9 +241,16 @@ function code(error: unknown): string | undefined {
 
 test("one-shot runner executes locally, chains events, aggregates usage, and signs receipt", async () => {
   const target = await fixture()
-  const replayGuard = new InMemoryRunnerReplayGuard({
+  const inMemoryReplayGuard = new InMemoryRunnerReplayGuard({
     clock: () => new Date("2026-08-04T00:00:01.000Z"),
   })
+  let observedReplayClaim: RunnerReplayClaim | undefined
+  const replayGuard = {
+    claim(claim: RunnerReplayClaim) {
+      observedReplayClaim = { ...claim }
+      return inMemoryReplayGuard.claim(claim)
+    },
+  }
   const secretReasoning = "never store this model text"
   const result = await executeOneShotRunnerTask({
     taskEnvelope: target.envelope,
@@ -273,6 +281,13 @@ test("one-shot runner executes locally, chains events, aggregates usage, and sig
     publicKey: target.runner.publicKey,
   })
   assert.equal(receipt.outcome.status, "completed")
+  assert.deepEqual(observedReplayClaim, {
+    runnerId: target.task.runnerId,
+    taskId: target.task.taskId,
+    nonce: target.task.nonce,
+    fencingToken: target.task.fencingToken,
+    expiresAt: target.task.expiresAt,
+  })
   assert.deepEqual(receipt.usage, {
     inputTokens: 10,
     outputTokens: 5,
@@ -315,6 +330,34 @@ test("one-shot runner executes locally, chains events, aggregates usage, and sig
       }),
     (error) => code(error) === "RUNNER_TASK_REPLAYED",
   )
+})
+
+test("signature failure does not call the replay guard", async () => {
+  const target = await fixture()
+  const wrong = generateKeyPairSync("ed25519")
+  let claimCalls = 0
+  await assert.rejects(
+    () =>
+      executeOneShotRunnerTask({
+        taskEnvelope: target.envelope,
+        resolvePlatformPublicKey: () => wrong.publicKey,
+        runnerId: target.task.runnerId,
+        sellerId: target.task.sellerId,
+        resolveLocalPackage: () => target.directory,
+        hostRegistry: registryFor(),
+        replayGuard: {
+          claim() {
+            claimCalls += 1
+            return true
+          },
+        },
+        receiptKeyId: "runner-key-1",
+        receiptPrivateKey: target.runner.privateKey,
+        clock: () => new Date("2026-08-04T00:00:01.000Z"),
+      }),
+    (error) => code(error) === "RUNNER_SIGNATURE_INVALID",
+  )
+  assert.equal(claimCalls, 0)
 })
 
 test("wrong keys, identities, expiry, and lease expiry are rejected before local execution", async () => {

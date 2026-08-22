@@ -237,6 +237,9 @@ export class DurableRunnerReplayGuard implements RunnerReplayGuardPort {
       typeof claim.runnerId !== "string" ||
       typeof claim.taskId !== "string" ||
       typeof claim.nonce !== "string" ||
+      typeof claim.fencingToken !== "number" ||
+      !Number.isSafeInteger(claim.fencingToken) ||
+      claim.fencingToken < 1 ||
       typeof claim.expiresAt !== "string"
     ) {
       throw new ValidationError("runner_replay_claim_invalid")
@@ -252,7 +255,7 @@ export class DurableRunnerReplayGuard implements RunnerReplayGuardPort {
       taskId: claim.taskId,
       runnerId: claim.runnerId,
       nonce: claim.nonce,
-      fencingToken: 0,
+      fencingToken: claim.fencingToken,
       status: "claimed",
       eventsEmitted: 0,
       claimedAt: now.toISOString(),
@@ -344,9 +347,14 @@ export class InMemoryDurableStore implements RunnerDurableStorePort {
     const key = `${attempt.taskId}::${attempt.nonce}`
     if (this.#attempts.has(key)) return false
 
-    // Check fencing: if a newer fencing token exists for this task, reject
+    // Check fencing: if a newer fencing token exists for this task, reject.
+    // A zero token can only come from the legacy replay adapter, which lost
+    // the verified value. Fail closed because its ordering cannot be proven.
     for (const existing of this.#attempts.values()) {
-      if (existing.taskId === attempt.taskId && existing.fencingToken > attempt.fencingToken) {
+      if (
+        existing.taskId === attempt.taskId &&
+        (existing.fencingToken === 0 || existing.fencingToken > attempt.fencingToken)
+      ) {
         return false
       }
     }

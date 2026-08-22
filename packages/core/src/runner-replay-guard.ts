@@ -8,6 +8,7 @@ export interface RunnerReplayClaim {
   runnerId: string
   taskId: string
   nonce: string
+  fencingToken: number
   expiresAt: string
 }
 
@@ -20,6 +21,7 @@ export interface RunnerReplayGuardPort {
 }
 
 export interface InMemoryRunnerReplayGuardOptions {
+  /** Independent upper bound for nonce entries and task high-watermarks. */
   maxEntries?: number
   clock?: () => Date
 }
@@ -41,7 +43,8 @@ function validTimestamp(value: string): number {
  * durable atomic port so restarts cannot reopen the replay window.
  */
 export class InMemoryRunnerReplayGuard implements RunnerReplayGuardPort {
-  readonly #entries = new Map<string, number>()
+  readonly #nonceEntries = new Map<string, number>()
+  readonly #taskHighWatermarks = new Map<string, number>()
   readonly #maxEntries: number
   readonly #clock: () => Date
   #lastClockMilliseconds = Number.NEGATIVE_INFINITY
@@ -69,8 +72,8 @@ export class InMemoryRunnerReplayGuard implements RunnerReplayGuardPort {
       descriptors = Object.getOwnPropertyDescriptors(claim)
       if (
         Reflect.ownKeys(descriptors).some((key) => typeof key !== "string") ||
-        Object.keys(descriptors).length !== 4 ||
-        !["runnerId", "taskId", "nonce", "expiresAt"].every((key) => {
+        Object.keys(descriptors).length !== 5 ||
+        !["runnerId", "taskId", "nonce", "fencingToken", "expiresAt"].every((key) => {
           const descriptor = descriptors[key]
           return (
             Object.hasOwn(descriptors, key) &&
@@ -88,15 +91,19 @@ export class InMemoryRunnerReplayGuard implements RunnerReplayGuardPort {
     const runnerId = descriptors.runnerId.value as unknown
     const taskId = descriptors.taskId.value as unknown
     const nonce = descriptors.nonce.value as unknown
+    const fencingToken = descriptors.fencingToken.value as unknown
     const expiresAt = descriptors.expiresAt.value as unknown
     if (
       typeof runnerId !== "string" ||
       typeof taskId !== "string" ||
       typeof nonce !== "string" ||
+      typeof fencingToken !== "number" ||
       typeof expiresAt !== "string" ||
       !CLAIM_ID_PATTERN.test(runnerId) ||
       !CLAIM_ID_PATTERN.test(taskId) ||
-      !BASE64URL_PATTERN.test(nonce)
+      !BASE64URL_PATTERN.test(nonce) ||
+      !Number.isSafeInteger(fencingToken) ||
+      fencingToken < 1
     ) {
       throw new ValidationError("runner_replay_claim_invalid")
     }
@@ -136,22 +143,37 @@ export class InMemoryRunnerReplayGuard implements RunnerReplayGuardPort {
     }
     this.#lastClockMilliseconds = nowMilliseconds
     const expiryMilliseconds = validTimestamp(expiresAt)
-    for (const [key, expiry] of this.#entries) {
-      if (expiry <= nowMilliseconds) this.#entries.delete(key)
+    for (const [key, expiry] of this.#nonceEntries) {
+      if (expiry <= nowMilliseconds) this.#nonceEntries.delete(key)
     }
     if (expiryMilliseconds <= nowMilliseconds) return false
     // Consume a nonce across all tasks for one Runner. taskId is validated for
     // auditability but deliberately cannot scope away a replay collision.
     const key = `${runnerId.length}:${runnerId}${nonce.length}:${nonce}`
-    if (this.#entries.has(key)) return false
-    if (this.#entries.size >= this.#maxEntries) {
+    if (this.#nonceEntries.has(key)) return false
+    const taskKey = taskId
+    const highWatermark = this.#taskHighWatermarks.get(taskKey)
+    if (highWatermark !== undefined && highWatermark > fencingToken) {
+      return false
+    }
+    if (
+      this.#nonceEntries.size >= this.#maxEntries ||
+      (highWatermark === undefined &&
+        this.#taskHighWatermarks.size >= this.#maxEntries)
+    ) {
       throw new CoreError(
         "RUNNER_REPLAY_GUARD_CAPACITY",
         "Runner replay guard cannot safely accept another claim",
         { retryable: true },
       )
     }
-    this.#entries.set(key, expiryMilliseconds)
+    // Capacity and ordering are checked before either table is mutated so a
+    // rejected claim cannot consume its nonce or advance a task watermark.
+    this.#taskHighWatermarks.set(
+      taskKey,
+      Math.max(highWatermark ?? fencingToken, fencingToken),
+    )
+    this.#nonceEntries.set(key, expiryMilliseconds)
     return true
   }
 }

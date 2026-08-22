@@ -53,6 +53,13 @@ V0.3 的目标链路是：
 `executeOneShotRunnerTask()` 在签名、身份、lease 或 replay 等前置失败时 reject。nonce
 被原子消费后，包身份/摘要、输入或 Host 的确定性失败会正常 resolve，并携带 Runner
 签名的失败回执；平台据此结束 attempt，不得用同一个 nonce 重试。
+replay claim 必须把已验签的正安全整数 `fencingToken` 原样持久化；同一 task 已有更高 token
+时拒绝较低 token，不同 nonce 的相同 token 仍可按原子 claim 语义处理。旧版写入的 `0`
+无法还原原 token，因此同一 task 的后续 claim 保守失败关闭。
+`InMemoryRunnerReplayGuard` 仅在当前进程生命周期保留有界 task 高水位；nonce 到期清理不会
+降低该水位，但进程重启仍会丢失全部状态。`RunnerDurableStorePort` 及内存 reference store
+只定义和演示 compare-and-write 语义；生产 durable transaction、崩溃原子性及有界
+compaction conformance 仍为 **NOT VERIFIED**。
 
 长期 Runner 的传输层应把平台 API 映射为下面的调用关系，不能把平台返回的路径、命令
 或凭证传进执行器：

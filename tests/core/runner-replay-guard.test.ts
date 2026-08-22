@@ -7,6 +7,7 @@ const claim = {
   runnerId: "runner-1",
   taskId: "task-1",
   nonce: Buffer.alloc(16, 1).toString("base64url"),
+  fencingToken: 1,
   expiresAt: "2026-08-04T00:05:00.000Z",
 }
 
@@ -71,12 +72,157 @@ test("replay guard rejects expired claims and bad clocks", () => {
   )
 })
 
+test("replay guard rejects a lower fencing token but accepts an equal token with a new nonce", () => {
+  const guard = new InMemoryRunnerReplayGuard({
+    clock: () => new Date("2026-08-04T00:00:00.000Z"),
+  })
+  assert.equal(guard.claim({ ...claim, fencingToken: 9 }), true)
+  assert.equal(
+    guard.claim({
+      ...claim,
+      runnerId: "runner-2",
+      nonce: Buffer.alloc(16, 2).toString("base64url"),
+      fencingToken: 8,
+    }),
+    false,
+  )
+  assert.equal(
+    guard.claim({
+      ...claim,
+      nonce: Buffer.alloc(16, 3).toString("base64url"),
+      fencingToken: 9,
+    }),
+    true,
+  )
+})
+
+test("replay guard retains a task high-watermark after the higher nonce expires", () => {
+  let now = new Date("2026-08-04T00:00:00.000Z")
+  const guard = new InMemoryRunnerReplayGuard({ clock: () => now })
+  assert.equal(
+    guard.claim({
+      ...claim,
+      fencingToken: 9,
+      expiresAt: "2026-08-04T00:01:00.000Z",
+    }),
+    true,
+  )
+  assert.equal(
+    guard.claim({
+      ...claim,
+      nonce: Buffer.alloc(16, 2).toString("base64url"),
+      fencingToken: 8,
+      expiresAt: "2026-08-04T00:10:00.000Z",
+    }),
+    false,
+  )
+
+  now = new Date("2026-08-04T00:01:00.000Z")
+  assert.equal(
+    guard.claim({
+      ...claim,
+      nonce: Buffer.alloc(16, 3).toString("base64url"),
+      fencingToken: 8,
+      expiresAt: "2026-08-04T00:10:00.000Z",
+    }),
+    false,
+  )
+  assert.equal(
+    guard.claim({
+      ...claim,
+      nonce: Buffer.alloc(16, 4).toString("base64url"),
+      fencingToken: 9,
+      expiresAt: "2026-08-04T00:10:00.000Z",
+    }),
+    true,
+  )
+})
+
+test("replay guard fails closed atomically when task watermark capacity is exhausted", () => {
+  let now = new Date("2026-08-04T00:00:00.000Z")
+  const guard = new InMemoryRunnerReplayGuard({ maxEntries: 1, clock: () => now })
+  assert.equal(
+    guard.claim({
+      ...claim,
+      fencingToken: 9,
+      expiresAt: "2026-08-04T00:01:00.000Z",
+    }),
+    true,
+  )
+
+  now = new Date("2026-08-04T00:01:00.000Z")
+  assert.throws(
+    () =>
+      guard.claim({
+        ...claim,
+        taskId: "task-2",
+        nonce: Buffer.alloc(16, 2).toString("base64url"),
+        fencingToken: 20,
+        expiresAt: "2026-08-04T00:10:00.000Z",
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "RUNNER_REPLAY_GUARD_CAPACITY",
+  )
+  assert.equal(
+    guard.claim({
+      ...claim,
+      nonce: Buffer.alloc(16, 2).toString("base64url"),
+      fencingToken: 9,
+      expiresAt: "2026-08-04T00:10:00.000Z",
+    }),
+    true,
+  )
+})
+
+test("replay guard capacity rejection does not advance an existing task watermark", () => {
+  let now = new Date("2026-08-04T00:00:00.000Z")
+  const guard = new InMemoryRunnerReplayGuard({ maxEntries: 1, clock: () => now })
+  assert.equal(
+    guard.claim({
+      ...claim,
+      fencingToken: 9,
+      expiresAt: "2026-08-04T00:01:00.000Z",
+    }),
+    true,
+  )
+  assert.throws(
+    () =>
+      guard.claim({
+        ...claim,
+        nonce: Buffer.alloc(16, 2).toString("base64url"),
+        fencingToken: 20,
+        expiresAt: "2026-08-04T00:10:00.000Z",
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "RUNNER_REPLAY_GUARD_CAPACITY",
+  )
+
+  now = new Date("2026-08-04T00:01:00.000Z")
+  assert.equal(
+    guard.claim({
+      ...claim,
+      nonce: Buffer.alloc(16, 3).toString("base64url"),
+      fencingToken: 10,
+      expiresAt: "2026-08-04T00:10:00.000Z",
+    }),
+    true,
+  )
+})
+
 test("replay guard validates and rejects proxy claims without traps", () => {
   const guard = new InMemoryRunnerReplayGuard({
     clock: () => new Date("2026-08-04T00:00:00.000Z"),
   })
   assert.throws(() => guard.claim({ ...claim, nonce: "short" }))
   assert.throws(() => guard.claim({ ...claim, taskId: "invalid task id" }))
+  for (const fencingToken of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(() => guard.claim({ ...claim, fencingToken }))
+  }
+  assert.throws(() => guard.claim({ ...claim, fencingToken: "1" as never }))
 
   let traps = 0
   const proxy = new Proxy(claim, {

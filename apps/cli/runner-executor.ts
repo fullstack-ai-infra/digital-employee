@@ -338,6 +338,7 @@ export async function executeOneShotRunnerTask(
       runnerId: task.runnerId,
       taskId: task.taskId,
       nonce: task.nonce,
+      fencingToken: task.fencingToken,
       expiresAt: task.expiresAt,
     })
   } catch {

@@ -84,6 +84,15 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Public `RunnerReplayClaim` values now require the verified positive
+  safe-integer `fencingToken`; direct claim callers and typed custom guard
+  fixtures must add the field, while executor-integrated guards receive it
+  automatically. The durable adapter persists the value unchanged and rejects
+  lower tokens after a new guard instance is attached to the same store;
+  legacy durable records whose token is `0` fail closed because their original
+  ordering cannot be recovered. The preview guard now bounds nonce TTL entries
+  separately from process-lifetime task high-watermarks, but remains explicitly
+  restart-unsafe.
 - The external stdio Adapter no longer fails closed on its own teardown
   traffic (#113). After a synthesized Schema-mismatch terminal, the mandated
   closing response is drained before the run stream is deleted, and `cancel`

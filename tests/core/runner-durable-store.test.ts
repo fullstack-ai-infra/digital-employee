@@ -281,9 +281,37 @@ describe("DurableRunnerReplayGuard", () => {
       runnerId: "runner-A",
       taskId: "task-100",
       nonce: "dGVzdC1ub25jZS0xMjM0NTY3OA",
+      fencingToken: 1,
       expiresAt: "2026-01-01T00:05:00.000Z",
     })
     assert.equal(ok, true)
+  })
+
+  it("persists the verified fencing token and rejects a lower token after restart", async () => {
+    const accepted = await guard.claim({
+      runnerId: "runner-A",
+      taskId: "task-100",
+      nonce: "dGVzdC1ub25jZS0xMjM0NTY3OA",
+      fencingToken: 9,
+      expiresAt: "2026-01-01T00:05:00.000Z",
+    })
+    assert.equal(accepted, true)
+    assert.equal(
+      store.getAttempt("task-100", "dGVzdC1ub25jZS0xMjM0NTY3OA")?.fencingToken,
+      9,
+    )
+
+    const restarted = new DurableRunnerReplayGuard(store, {
+      clock: () => new Date("2026-01-01T00:02:00.000Z"),
+    })
+    const stale = await restarted.claim({
+      runnerId: "runner-A",
+      taskId: "task-100",
+      nonce: "bmV3LW5vbmNlLTk4NzY1NDMyMQ",
+      fencingToken: 8,
+      expiresAt: "2026-01-01T00:05:00.000Z",
+    })
+    assert.equal(stale, false)
   })
 
   it("rejects duplicate nonce", async () => {
@@ -291,6 +319,7 @@ describe("DurableRunnerReplayGuard", () => {
       runnerId: "runner-A",
       taskId: "task-100",
       nonce: "dGVzdC1ub25jZS0xMjM0NTY3OA",
+      fencingToken: 1,
       expiresAt: "2026-01-01T00:05:00.000Z",
     }
     await guard.claim(claim)
@@ -303,9 +332,71 @@ describe("DurableRunnerReplayGuard", () => {
       runnerId: "runner-A",
       taskId: "task-100",
       nonce: "dGVzdC1ub25jZS0xMjM0NTY3OA",
+      fencingToken: 1,
       expiresAt: "2026-01-01T00:00:30.000Z", // before clock time
     })
     assert.equal(ok, false)
+    assert.equal(
+      store.getAttempt("task-100", "dGVzdC1ub25jZS0xMjM0NTY3OA"),
+      undefined,
+    )
+  })
+
+  it("accepts an equal fencing token with a different nonce", async () => {
+    assert.equal(
+      await guard.claim({
+        runnerId: "runner-A",
+        taskId: "task-100",
+        nonce: "dGVzdC1ub25jZS0xMjM0NTY3OA",
+        fencingToken: 5,
+        expiresAt: "2026-01-01T00:05:00.000Z",
+      }),
+      true,
+    )
+    assert.equal(
+      await guard.claim({
+        runnerId: "runner-A",
+        taskId: "task-100",
+        nonce: "bmV3LW5vbmNlLTk4NzY1NDMyMQ",
+        fencingToken: 5,
+        expiresAt: "2026-01-01T00:05:00.000Z",
+      }),
+      true,
+    )
+  })
+
+  it("rejects invalid fencing token numbers without persisting a claim", async () => {
+    for (const fencingToken of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await assert.rejects(
+        () =>
+          guard.claim({
+            runnerId: "runner-A",
+            taskId: "task-100",
+            nonce: "dGVzdC1ub25jZS0xMjM0NTY3OA",
+            fencingToken,
+            expiresAt: "2026-01-01T00:05:00.000Z",
+          }),
+        (error: Error) => error.message.includes("invalid"),
+      )
+    }
+    assert.equal(
+      store.getAttempt("task-100", "dGVzdC1ub25jZS0xMjM0NTY3OA"),
+      undefined,
+    )
+  })
+
+  it("fails closed when a legacy zero-token record makes ordering unknowable", async () => {
+    assert.equal(store.claimNonce(makeAttempt({ fencingToken: 0 })), true)
+    assert.equal(
+      await guard.claim({
+        runnerId: "runner-A",
+        taskId: "task-100",
+        nonce: "bmV3LW5vbmNlLTk4NzY1NDMyMQ",
+        fencingToken: 10,
+        expiresAt: "2026-01-01T00:05:00.000Z",
+      }),
+      false,
+    )
   })
 
   it("throws on invalid claim shape", async () => {
@@ -320,6 +411,7 @@ describe("DurableRunnerReplayGuard", () => {
       runnerId: "runner-A",
       taskId: "task-100",
       nonce: "dGVzdC1ub25jZS0xMjM0NTY3OA",
+      fencingToken: 1,
       expiresAt: "2026-01-01T00:05:00.000Z",
     })
     // New guard instance, same store (simulates restart)
@@ -330,6 +422,7 @@ describe("DurableRunnerReplayGuard", () => {
       runnerId: "runner-A",
       taskId: "task-100",
       nonce: "dGVzdC1ub25jZS0xMjM0NTY3OA",
+      fencingToken: 1,
       expiresAt: "2026-01-01T00:05:00.000Z",
     })
     assert.equal(ok, false)
