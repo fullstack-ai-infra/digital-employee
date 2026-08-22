@@ -437,21 +437,12 @@ async function resolveEngine(
 }
 
 async function preflightEngine(
-  runtime: DeployRuntime,
   engine: string,
   binding: DeployPackageBinding,
 ): Promise<string | undefined> {
-  if (runtime === "standalone-v1") {
-    if (engine === "extractive") return undefined
-    if (
-      engine === "openai-compatible" &&
-      process.env.OPENAI_API_KEY?.trim() &&
-      process.env.OPENAI_MODEL?.trim()
-    ) {
-      return undefined
-    }
-    return "standalone_engine_credentials_unavailable"
-  }
+  // standalone-v1 is rejected before preflight with
+  // package_deploy_standalone_unsupported; this function only validates the
+  // Agent-native engine path.
   try {
     const { host, compatibility } = await inspectEmployeeHostCompatibility({
       directory: binding.localReference,
@@ -614,7 +605,7 @@ async function deployImpl(options: DeployOptions = {}): Promise<void> {
     failInput("engine(agent-native)", AGENT_NATIVE_ENGINES)
     return
   }
-  const preflightFailure = await preflightEngine(runtime, engine, binding)
+  const preflightFailure = await preflightEngine(engine, binding)
   if (preflightFailure) {
     failCode("deploy.error_engine_unavailable", preflightFailure)
     writeRecoveryGuidance(
@@ -785,6 +776,7 @@ async function deployImpl(options: DeployOptions = {}): Promise<void> {
     }
     if (controller.signal.aborted) {
       failCode("deploy.error_interrupted", "deploy_interrupted")
+      writeRecoveryGuidance("deploy_interrupted")
       return
     }
     if (
@@ -807,6 +799,7 @@ async function deployImpl(options: DeployOptions = {}): Promise<void> {
         await lock.assertOwned()
         if (controller.signal.aborted) {
           failCode("deploy.error_interrupted", "deploy_interrupted")
+          writeRecoveryGuidance("deploy_interrupted")
           return
         }
         if (!prePublicationReadback) {
@@ -916,12 +909,14 @@ async function deployImpl(options: DeployOptions = {}): Promise<void> {
       }
       if (controller.signal.aborted) {
         failCode("deploy.error_interrupted", "deploy_interrupted")
+        writeRecoveryGuidance("deploy_interrupted")
         return
       }
     }
 
     if (controller.signal.aborted) {
       failCode("deploy.error_interrupted", "deploy_interrupted")
+      writeRecoveryGuidance("deploy_interrupted")
       return
     }
     const assertEffectBoundary = async (): Promise<void> => {
@@ -1269,6 +1264,7 @@ export async function deploy(options: DeployOptions = {}): Promise<void> {
   } catch (error) {
     if (error instanceof Error && error.message === "deploy_interrupted") {
       failCode("deploy.error_interrupted", "deploy_interrupted")
+      writeRecoveryGuidance("deploy_interrupted")
       return
     }
     if (error instanceof Error && error.message.startsWith("deploy_prompt_input_")) {
